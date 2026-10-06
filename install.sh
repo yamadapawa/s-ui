@@ -7,6 +7,18 @@ plain='\033[0m'
 
 cur_dir=$(pwd)
 
+# The repository can be overridden when installing a fork. Persist it beside
+# the installation so the interactive updater keeps using the same release
+# source after the one-shot installer exits.
+if [[ -z "${SUI_GITHUB_REPO:-}" && -f "/usr/local/s-ui/.github-repository" ]]; then
+    SUI_GITHUB_REPO=$(cat /usr/local/s-ui/.github-repository)
+fi
+SUI_GITHUB_REPO="${SUI_GITHUB_REPO:-alireza0/s-ui}"
+if [[ ! "$SUI_GITHUB_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "Invalid SUI_GITHUB_REPO. Expected owner/repository." >&2
+    exit 1
+fi
+
 #############################################
 # Localization
 #
@@ -526,7 +538,7 @@ install_s-ui() {
     local sums="$workdir/SHA256SUMS"
 
     if [ $# == 0 ]; then
-        last_version=$(curl -Ls "https://api.github.com/repos/alireza0/s-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        last_version=$(curl -Ls "https://api.github.com/repos/${SUI_GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
             echo -e "${red}$(t fetch_fail)${plain}"
             exit 1
@@ -540,7 +552,7 @@ install_s-ui() {
     # No --no-check-certificate. It was on every download here, which turns the
     # whole install into an unauthenticated fetch: anyone able to intercept it
     # chooses the binary that then runs as root.
-    local base="https://github.com/alireza0/s-ui/releases/download/${last_version}"
+    local base="https://github.com/${SUI_GITHUB_REPO}/releases/download/${last_version}"
     if ! fetch "${base}/s-ui-linux-$(arch).tar.gz" "$archive"; then
         if [ $# == 0 ]; then
             echo -e "${red}$(t download_fail)${plain}"
@@ -575,6 +587,7 @@ install_s-ui() {
         rm -rf s-ui
         exit 1
     fi
+    printf '%s\n' "$SUI_GITHUB_REPO" > /usr/local/s-ui/.github-repository
     if ! /usr/local/s-ui/sui -v >/dev/null 2>&1; then
         echo -e "${red}$(t broken_bin)${plain}"
         df -h /usr/local 2>/dev/null

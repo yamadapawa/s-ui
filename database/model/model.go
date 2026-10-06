@@ -36,23 +36,35 @@ type Client struct {
 	Links    json.RawMessage `json:"links,omitempty" form:"links"`
 	Volume   int64           `json:"volume" form:"volume"`
 	Expiry   int64           `json:"expiry" form:"expiry"`
-	Down     int64           `json:"down" form:"down"`
-	Up       int64           `json:"up" form:"up"`
-	Desc     string          `json:"desc" form:"desc"`
-	Group    string          `json:"group" form:"group"`
-	Remark   string          `json:"remark" form:"remark"`
+	// TrafficMultiplier scales measured traffic only for the client's quota.
+	// Historical/statistical traffic remains the actual byte count.
+	TrafficMultiplier float64 `json:"trafficMultiplier" form:"trafficMultiplier" gorm:"default:1;not null"`
+	// MaxIPs is the maximum number of distinct source IPs with live sessions.
+	// Zero means unlimited.
+	MaxIPs             int     `json:"maxIPs" form:"maxIPs" gorm:"default:0;not null"`
+	Down               int64   `json:"down" form:"down"`
+	Up                 int64   `json:"up" form:"up"`
+	ActualDown         int64   `json:"actualDown" form:"actualDown" gorm:"default:0;not null"`
+	ActualUp           int64   `json:"actualUp" form:"actualUp" gorm:"default:0;not null"`
+	QuotaUpRemainder   float64 `json:"-" gorm:"default:0;not null"`
+	QuotaDownRemainder float64 `json:"-" gorm:"default:0;not null"`
+	Desc               string  `json:"desc" form:"desc"`
+	Group              string  `json:"group" form:"group"`
+	Remark             string  `json:"remark" form:"remark"`
 
 	// Timestamps (unix seconds): creation time and last time the client had traffic
 	CreatedAt int64 `json:"createdAt" form:"createdAt" gorm:"default:0;not null"`
 	OnlineAt  int64 `json:"onlineAt" form:"onlineAt" gorm:"default:0;not null"`
 
 	// Delay start and periodic reset
-	DelayStart bool  `json:"delayStart" form:"delayStart" gorm:"default:false;not null"`
-	AutoReset  bool  `json:"autoReset" form:"autoReset" gorm:"default:false;not null"`
-	ResetDays  int   `json:"resetDays" form:"resetDays" gorm:"default:0;not null"`
-	NextReset  int64 `json:"nextReset" form:"nextReset" gorm:"default:0;not null"`
-	TotalUp    int64 `json:"totalUp" form:"totalUp" gorm:"default:0;not null"`
-	TotalDown  int64 `json:"totalDown" form:"totalDown" gorm:"default:0;not null"`
+	DelayStart      bool  `json:"delayStart" form:"delayStart" gorm:"default:false;not null"`
+	AutoReset       bool  `json:"autoReset" form:"autoReset" gorm:"default:false;not null"`
+	ResetDays       int   `json:"resetDays" form:"resetDays" gorm:"default:0;not null"`
+	NextReset       int64 `json:"nextReset" form:"nextReset" gorm:"default:0;not null"`
+	TotalUp         int64 `json:"totalUp" form:"totalUp" gorm:"default:0;not null"`
+	TotalDown       int64 `json:"totalDown" form:"totalDown" gorm:"default:0;not null"`
+	TotalActualUp   int64 `json:"totalActualUp" form:"totalActualUp" gorm:"default:0;not null"`
+	TotalActualDown int64 `json:"totalActualDown" form:"totalActualDown" gorm:"default:0;not null"`
 }
 
 type Stats struct {

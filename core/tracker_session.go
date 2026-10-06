@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +35,7 @@ type Session struct {
 	Outbound    string
 	Network     string
 	Source      M.Socksaddr
+	sourceIP    string
 	Destination M.Socksaddr
 	// Domain is the name the connection is really for: what the client asked
 	// for, or what sniffing found when the client only sent an address.
@@ -67,11 +70,13 @@ var _ adapter.ConnectionTracker = (*SessionTracker)(nil)
 // per connection that both counts traffic and keeps the session closable, so a
 // user who was just removed from an inbound can actually be cut off.
 type SessionTracker struct {
-	access    sync.Mutex
-	inbounds  map[string]Counter
-	outbounds map[string]Counter
-	users     map[string]Counter
-	sessions  map[uint64]*Session
+	access        sync.Mutex
+	inbounds      map[string]Counter
+	outbounds     map[string]Counter
+	users         map[string]Counter
+	sessions      map[uint64]*Session
+	userIPLimits  map[string]int
+	activeUserIPs map[string]map[string]int
 	// nextID only has to be unique among live sessions, so it is a counter
 	// rather than a UUID: this runs on every connection.
 	nextID uint64
@@ -79,11 +84,43 @@ type SessionTracker struct {
 
 func NewSessionTracker() *SessionTracker {
 	return &SessionTracker{
-		inbounds:  make(map[string]Counter),
-		outbounds: make(map[string]Counter),
-		users:     make(map[string]Counter),
-		sessions:  make(map[uint64]*Session),
+		inbounds:      make(map[string]Counter),
+		outbounds:     make(map[string]Counter),
+		users:         make(map[string]Counter),
+		sessions:      make(map[uint64]*Session),
+		userIPLimits:  make(map[string]int),
+		activeUserIPs: make(map[string]map[string]int),
 	}
+}
+
+// SetUserIPLimits replaces the per-client distinct-source-IP limits. Zero or
+// absent limits mean unlimited. A snapshot is used so connection admission
+// never has to query the database.
+func (t *SessionTracker) SetUserIPLimits(limits map[string]int) {
+	next := make(map[string]int, len(limits))
+	for user, limit := range limits {
+		if user != "" && limit > 0 {
+			next[user] = limit
+		}
+	}
+	t.access.Lock()
+	t.userIPLimits = next
+	t.access.Unlock()
+}
+
+func sourceIP(source M.Socksaddr) string {
+	address := source.String()
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		if parsed, parseErr := netip.ParseAddr(address); parseErr == nil {
+			return parsed.Unmap().String()
+		}
+		return strings.Trim(address, "[]")
+	}
+	if parsed, parseErr := netip.ParseAddr(host); parseErr == nil {
+		return parsed.Unmap().String()
+	}
+	return host
 }
 
 func (t *SessionTracker) loadOrCreateCounter(obj map[string]Counter, name string) Counter {
@@ -99,7 +136,7 @@ func (t *SessionTracker) loadOrCreateCounter(obj map[string]Counter, name string
 // newSession registers the session and returns the counter slices to hand to
 // the counting conn: index 0 is the session's own counter, the rest are the
 // aggregates GetStats drains.
-func (t *SessionTracker) newSession(metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound, network string) (*Session, []*atomic.Int64, []*atomic.Int64) {
+func (t *SessionTracker) newSession(metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound, network string) (*Session, []*atomic.Int64, []*atomic.Int64, bool) {
 	// The router fills RouteRule and RouteOutbound in just before it calls the
 	// trackers, so both are reused rather than formatted a second time: a rule's
 	// String() is not free and this runs per connection.
@@ -113,6 +150,7 @@ func (t *SessionTracker) newSession(metadata adapter.InboundContext, matchedRule
 		Outbound:    outbound,
 		Network:     network,
 		Source:      metadata.Source,
+		sourceIP:    sourceIP(metadata.Source),
 		Destination: metadata.Destination,
 		CreatedAt:   time.Now(),
 		Upload:      &atomic.Int64{},
@@ -135,6 +173,12 @@ func (t *SessionTracker) newSession(metadata adapter.InboundContext, matchedRule
 
 	t.access.Lock()
 	defer t.access.Unlock()
+	if limit := t.userIPLimits[session.User]; limit > 0 && session.sourceIP != "" {
+		activeIPs := t.activeUserIPs[session.User]
+		if _, alreadyActive := activeIPs[session.sourceIP]; !alreadyActive && len(activeIPs) >= limit {
+			return session, nil, nil, false
+		}
+	}
 	t.nextID++
 	session.ID = t.nextID
 	if session.Inbound != "" {
@@ -153,17 +197,49 @@ func (t *SessionTracker) newSession(metadata adapter.InboundContext, matchedRule
 		writeCounter = append(writeCounter, counter.write)
 	}
 	t.sessions[session.ID] = session
-	return session, readCounter, writeCounter
+	if session.User != "" && session.sourceIP != "" {
+		if t.activeUserIPs[session.User] == nil {
+			t.activeUserIPs[session.User] = make(map[string]int)
+		}
+		t.activeUserIPs[session.User][session.sourceIP]++
+	}
+	return session, readCounter, writeCounter, true
+}
+
+func (t *SessionTracker) removeSessionLocked(session *Session) {
+	if _, exists := t.sessions[session.ID]; !exists {
+		return
+	}
+	delete(t.sessions, session.ID)
+	if session.User == "" || session.sourceIP == "" {
+		return
+	}
+	counts := t.activeUserIPs[session.User]
+	if counts == nil {
+		return
+	}
+	if counts[session.sourceIP] <= 1 {
+		delete(counts, session.sourceIP)
+	} else {
+		counts[session.sourceIP]--
+	}
+	if len(counts) == 0 {
+		delete(t.activeUserIPs, session.User)
+	}
 }
 
 func (t *SessionTracker) leave(session *Session) {
 	t.access.Lock()
 	defer t.access.Unlock()
-	delete(t.sessions, session.ID)
+	t.removeSessionLocked(session)
 }
 
 func (t *SessionTracker) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
-	session, readCounter, writeCounter := t.newSession(metadata, matchedRule, matchOutbound, N.NetworkTCP)
+	session, readCounter, writeCounter, allowed := t.newSession(metadata, matchedRule, matchOutbound, N.NetworkTCP)
+	if !allowed {
+		_ = conn.Close()
+		return conn
+	}
 	tracked := &sessionConn{
 		ExtendedConn: bufio.NewInt64CounterConn(conn, readCounter, writeCounter),
 		tracker:      t,
@@ -174,7 +250,11 @@ func (t *SessionTracker) RoutedConnection(ctx context.Context, conn net.Conn, me
 }
 
 func (t *SessionTracker) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) N.PacketConn {
-	session, readCounter, writeCounter := t.newSession(metadata, matchedRule, matchOutbound, N.NetworkUDP)
+	session, readCounter, writeCounter, allowed := t.newSession(metadata, matchedRule, matchOutbound, N.NetworkUDP)
+	if !allowed {
+		_ = conn.Close()
+		return conn
+	}
 	tracked := &sessionPacketConn{
 		PacketConn: bufio.NewInt64CounterPacketConn(conn, readCounter, nil, writeCounter, nil),
 		tracker:    t,
@@ -259,11 +339,11 @@ func (t *SessionTracker) Sessions() []SessionInfo {
 func (t *SessionTracker) takeSessions(match func(*Session) bool) []io.Closer {
 	t.access.Lock()
 	var closers []io.Closer
-	for id, session := range t.sessions {
+	for _, session := range t.sessions {
 		if !match(session) {
 			continue
 		}
-		delete(t.sessions, id)
+		t.removeSessionLocked(session)
 		if session.closer != nil {
 			closers = append(closers, session.closer)
 		}

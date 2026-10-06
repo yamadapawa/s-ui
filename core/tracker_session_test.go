@@ -16,16 +16,54 @@ type testOutbound struct {
 func (o *testOutbound) Tag() string { return o.tag }
 
 func trackConn(t *testing.T, tracker *SessionTracker, inbound, user string) (net.Conn, net.Conn) {
+	return trackConnFrom(t, tracker, inbound, user, "10.0.0.1:1234")
+}
+
+func trackConnFrom(t *testing.T, tracker *SessionTracker, inbound, user, source string) (net.Conn, net.Conn) {
 	t.Helper()
 	client, server := net.Pipe()
 	metadata := adapter.InboundContext{
 		Inbound:     inbound,
 		User:        user,
-		Source:      M.ParseSocksaddr("10.0.0.1:1234"),
+		Source:      M.ParseSocksaddr(source),
 		Destination: M.ParseSocksaddr("example.com:443"),
 	}
 	tracked := tracker.RoutedConnection(t.Context(), server, metadata, nil, &testOutbound{tag: "direct"})
 	return client, tracked
+}
+
+func TestSessionTrackerEnforcesDistinctSourceIPLimit(t *testing.T) {
+	tracker := NewSessionTracker()
+	tracker.SetUserIPLimits(map[string]int{"alice": 1})
+
+	firstClient, firstSession := trackConnFrom(t, tracker, "in", "alice", "198.51.100.10:1200")
+	defer firstClient.Close()
+	defer firstSession.Close()
+	secondClient, secondSession := trackConnFrom(t, tracker, "in", "alice", "198.51.100.10:2200")
+	defer secondClient.Close()
+	defer secondSession.Close()
+	if len(tracker.Sessions()) != 2 {
+		t.Fatal("multiple connections from one source IP should be allowed")
+	}
+
+	blockedClient, blockedSession := trackConnFrom(t, tracker, "in", "alice", "198.51.100.11:3200")
+	defer blockedClient.Close()
+	if _, err := blockedClient.Write([]byte("x")); err == nil {
+		t.Fatal("a new source IP should be rejected after reaching the limit")
+	}
+	if len(tracker.Sessions()) != 2 {
+		t.Fatalf("rejected connection was tracked: got %d sessions", len(tracker.Sessions()))
+	}
+	_ = blockedSession.Close()
+
+	_ = firstSession.Close()
+	_ = secondSession.Close()
+	allowedClient, allowedSession := trackConnFrom(t, tracker, "in", "alice", "198.51.100.11:4200")
+	defer allowedClient.Close()
+	defer allowedSession.Close()
+	if len(tracker.Sessions()) != 1 {
+		t.Fatal("a new source IP should be allowed after the previous IP disconnects")
+	}
 }
 
 func TestSessionTrackerCountsAndForgets(t *testing.T) {

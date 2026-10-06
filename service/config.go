@@ -261,6 +261,9 @@ func (s *ConfigService) startCoreLocked(bypassCooldown bool) error {
 		logger.Error("start sing-box err:", err.Error())
 		return err
 	}
+	if err = s.refreshUserIPLimits(); err != nil {
+		logger.Warning("unable to refresh client IP limits: ", err)
+	}
 	// Cleared on success, or one failure arms the cooldown forever.
 	failMu.Lock()
 	lastStartFailTime = time.Time{}
@@ -319,6 +322,9 @@ func (s *ConfigService) restartCoreWithConfig(config json.RawMessage) error {
 	if err := corePtr.Start(*rawConfig); err != nil {
 		logger.Error("restart sing-box err (start):", err.Error())
 		return err
+	}
+	if err := s.refreshUserIPLimits(); err != nil {
+		logger.Warning("unable to refresh client IP limits: ", err)
 	}
 	logger.Info("sing-box restarted with new config")
 	return nil
@@ -395,6 +401,11 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 			logger.Error("failed to commit config save: ", cErr)
 			return
 		}
+		if obj == "clients" {
+			if refreshErr := s.refreshUserIPLimits(); refreshErr != nil {
+				logger.Warning("unable to refresh client IP limits: ", refreshErr)
+			}
+		}
 		if restartWith != nil {
 			// Detached: a restart takes seconds and this is an HTTP handler.
 			// The recover is required -- a panic here is outside gin's reach.
@@ -469,6 +480,28 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 	LastUpdate = time.Now().Unix()
 
 	return objs, nil
+}
+
+// refreshUserIPLimits publishes a database snapshot to the live session
+// tracker. Connection admission therefore performs no database I/O.
+func (s *ConfigService) refreshUserIPLimits() error {
+	if corePtr == nil {
+		return nil
+	}
+	box := corePtr.GetInstance()
+	if box == nil {
+		return nil
+	}
+	var clients []model.Client
+	if err := database.GetDB().Model(model.Client{}).Select("name", "max_ips").Where("max_ips > 0").Find(&clients).Error; err != nil {
+		return err
+	}
+	limits := make(map[string]int, len(clients))
+	for _, client := range clients {
+		limits[client.Name] = client.MaxIPs
+	}
+	box.SessionTracker().SetUserIPLimits(limits)
+	return nil
 }
 
 func (s *ConfigService) CheckChanges(lu string) (bool, error) {

@@ -66,6 +66,18 @@ Full documentation lives in the [Wiki](https://github.com/alireza0/s-ui/wiki):
 
 ## Install & Upgrade to Latest Version
 
+### Install this fork on a VPS
+
+The release workflow builds Linux packages when a version tag is pushed. After a release is published, install or upgrade this fork on Ubuntu/Debian with:
+
+```sh
+SUI_GITHUB_REPO=yamadapawa/s-ui SUI_LANG=zhcn bash <(curl -fsSL https://raw.githubusercontent.com/yamadapawa/s-ui/main/install.sh)
+```
+
+The installer records the repository and the panel's update menu continues to use this fork. Open the panel on port `2095` (default path `/app/`); the subscription service uses port `2096` by default. Open the configured ports in both the VPS firewall and the cloud provider's firewall.
+
+The first custom release must finish building in GitHub Actions before this command can install it. To create a release, push a new `v*` tag after the changes are on `main`.
+
 ### Linux/macOS
 ```sh
 bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/master/install.sh)

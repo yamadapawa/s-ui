@@ -82,15 +82,19 @@ func TestPeriodicResetRollsTrafficForward(t *testing.T) {
 
 	const now = int64(1_000_000)
 	c := createClient(t, db, &model.Client{
-		Name:      "monthly",
-		Enable:    true,
-		AutoReset: true,
-		ResetDays: 30,
-		NextReset: now - 1,
-		Up:        500,
-		Down:      700,
-		TotalUp:   100,
-		TotalDown: 200,
+		Name:            "monthly",
+		Enable:          true,
+		AutoReset:       true,
+		ResetDays:       30,
+		NextReset:       now - 1,
+		Up:              500,
+		Down:            700,
+		ActualUp:        400,
+		ActualDown:      600,
+		TotalUp:         100,
+		TotalDown:       200,
+		TotalActualUp:   10,
+		TotalActualDown: 20,
 	})
 
 	if _, err := s.ResetClients(db, now); err != nil {
@@ -103,6 +107,9 @@ func TestPeriodicResetRollsTrafficForward(t *testing.T) {
 	}
 	if got.TotalUp != 600 || got.TotalDown != 900 {
 		t.Errorf("totals = %d/%d, want 600/900", got.TotalUp, got.TotalDown)
+	}
+	if got.ActualUp != 0 || got.ActualDown != 0 || got.TotalActualUp != 410 || got.TotalActualDown != 620 {
+		t.Errorf("actual counters = current %d/%d, total %d/%d; want current 0/0, total 410/620", got.ActualUp, got.ActualDown, got.TotalActualUp, got.TotalActualDown)
 	}
 	if want := now + 30*86400; got.NextReset != want {
 		t.Errorf("next_reset = %d, want %d", got.NextReset, want)
@@ -200,12 +207,16 @@ func TestResetUsageThroughTheClientForm(t *testing.T) {
 	s := &ClientService{}
 
 	c := createClient(t, db, &model.Client{
-		Name:      "someone",
-		Enable:    true,
-		Up:        4_000,
-		Down:      6_000,
-		TotalUp:   10_000,
-		TotalDown: 20_000,
+		Name:            "someone",
+		Enable:          true,
+		Up:              4_000,
+		Down:            6_000,
+		ActualUp:        2_000,
+		ActualDown:      3_000,
+		TotalUp:         10_000,
+		TotalDown:       20_000,
+		TotalActualUp:   1_000,
+		TotalActualDown: 2_000,
 	})
 
 	// What the reset button posts: counters zeroed, everything else as shown.
@@ -224,6 +235,9 @@ func TestResetUsageThroughTheClientForm(t *testing.T) {
 	// The lifetime counters take on what was just cleared.
 	if reset.TotalUp != 14_000 || reset.TotalDown != 26_000 {
 		t.Errorf("totals = %d/%d, want 14000/26000", reset.TotalUp, reset.TotalDown)
+	}
+	if reset.ActualUp != 0 || reset.ActualDown != 0 || reset.TotalActualUp != 3_000 || reset.TotalActualDown != 5_000 {
+		t.Errorf("actual counters = current %d/%d, total %d/%d; want current 0/0, total 3000/5000", reset.ActualUp, reset.ActualDown, reset.TotalActualUp, reset.TotalActualDown)
 	}
 }
 

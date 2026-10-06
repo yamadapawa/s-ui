@@ -1,6 +1,7 @@
 package service
 
 import (
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -33,6 +34,19 @@ var (
 )
 
 type StatsService struct {
+}
+
+func billedTraffic(actual int64, multiplier float64, remainder float64) (int64, float64) {
+	if multiplier <= 0 || math.IsNaN(multiplier) || math.IsInf(multiplier, 0) {
+		multiplier = 1
+	}
+	exact := float64(actual)*multiplier + remainder
+	charged := int64(math.Floor(exact + 1e-9))
+	fraction := exact - float64(charged)
+	if fraction < 0 && fraction > -1e-8 {
+		fraction = 0
+	}
+	return charged, fraction
 }
 
 func (s *StatsService) SaveStats(enableTraffic bool, bucketSeconds int64) error {
@@ -120,14 +134,47 @@ func (s *StatsService) SaveStats(enableTraffic bool, bucketSeconds int64) error 
 			}
 		}
 	}
+	// Read quota multipliers in one query while retaining the raw counters in
+	// model.Stats. Only the per-client quota counters are scaled.
+	var clients []model.Client
+	if len(userTraffic) > 0 {
+		names := make([]string, 0, len(userTraffic))
+		for name := range userTraffic {
+			names = append(names, name)
+		}
+		err = tx.Model(model.Client{}).Select("name", "traffic_multiplier", "quota_up_remainder", "quota_down_remainder").Where("name IN ?", names).Find(&clients).Error
+		if err != nil {
+			return err
+		}
+	}
+	clientPolicies := make(map[string]model.Client, len(clients))
+	for _, client := range clients {
+		clientPolicies[client.Name] = client
+	}
 
 	for name, t := range userTraffic {
+		policy, exists := clientPolicies[name]
+		if !exists {
+			// The client may have been deleted between a traffic drain and this
+			// transaction; the name has no quota row to update.
+			continue
+		}
+		multiplier := policy.TrafficMultiplier
+		if multiplier <= 0 || math.IsNaN(multiplier) || math.IsInf(multiplier, 0) {
+			multiplier = 1
+		}
 		update := map[string]interface{}{"online_at": now}
 		if t.up > 0 {
-			update["up"] = gorm.Expr("up + ?", t.up)
+			charged, remainder := billedTraffic(t.up, multiplier, policy.QuotaUpRemainder)
+			update["actual_up"] = gorm.Expr("actual_up + ?", t.up)
+			update["up"] = gorm.Expr("up + ?", charged)
+			update["quota_up_remainder"] = remainder
 		}
 		if t.down > 0 {
-			update["down"] = gorm.Expr("down + ?", t.down)
+			charged, remainder := billedTraffic(t.down, multiplier, policy.QuotaDownRemainder)
+			update["actual_down"] = gorm.Expr("actual_down + ?", t.down)
+			update["down"] = gorm.Expr("down + ?", charged)
+			update["quota_down_remainder"] = remainder
 		}
 		err = tx.Model(model.Client{}).Where("name = ?", name).Updates(update).Error
 		if err != nil {

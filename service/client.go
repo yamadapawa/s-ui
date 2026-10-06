@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"strings"
 	"time"
 
@@ -39,7 +40,7 @@ func (s *ClientService) GetAll() (*[]model.Client, error) {
 	db := database.GetDB()
 	var clients []model.Client
 	err := db.Model(model.Client{}).
-		Select("`id`, `enable`, `name`, `desc`, `group`, `remark`, `inbounds`, `up`, `down`, `volume`, `expiry`, `created_at`, `online_at`").
+		Select("`id`, `enable`, `name`, `desc`, `group`, `remark`, `inbounds`, `up`, `down`, `actual_up`, `actual_down`, `total_up`, `total_down`, `total_actual_up`, `total_actual_down`, `traffic_multiplier`, `max_ips`, `volume`, `expiry`, `created_at`, `online_at`").
 		Scan(&clients).Error
 	if err != nil {
 		return nil, err
@@ -79,6 +80,33 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		err = json.Unmarshal(data, &client)
 		if err != nil {
 			return nil, err
+		}
+		var fields map[string]json.RawMessage
+		if err = json.Unmarshal(data, &fields); err != nil {
+			return nil, err
+		}
+		if act == "new" && client.TrafficMultiplier == 0 {
+			client.TrafficMultiplier = 1
+		}
+		if act == "edit" {
+			// Older API clients omit new fields. Preserve their existing values
+			// instead of silently resetting quota policy on an unrelated edit.
+			var existing model.Client
+			if err = tx.Select("traffic_multiplier", "max_ips").Where("id = ?", client.Id).First(&existing).Error; err != nil {
+				return nil, err
+			}
+			if _, ok := fields["trafficMultiplier"]; !ok {
+				client.TrafficMultiplier = existing.TrafficMultiplier
+			}
+			if _, ok := fields["maxIPs"]; !ok {
+				client.MaxIPs = existing.MaxIPs
+			}
+		}
+		if math.IsNaN(client.TrafficMultiplier) || math.IsInf(client.TrafficMultiplier, 0) || client.TrafficMultiplier < 0.1 || client.TrafficMultiplier > 10 {
+			return nil, common.NewError("traffic multiplier must be between 0.1 and 10")
+		}
+		if client.MaxIPs < 0 || client.MaxIPs > 10000 {
+			return nil, common.NewError("maximum IPs must be between 0 and 10000")
 		}
 		if err = s.validateClientName(tx, &client); err != nil {
 			return nil, err
@@ -120,6 +148,15 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		// batch has to be checked against itself as well as against the table.
 		seen := make(map[string]bool, len(clients))
 		for _, client := range clients {
+			if client.TrafficMultiplier == 0 {
+				client.TrafficMultiplier = 1
+			}
+			if math.IsNaN(client.TrafficMultiplier) || math.IsInf(client.TrafficMultiplier, 0) || client.TrafficMultiplier < 0.1 || client.TrafficMultiplier > 10 {
+				return nil, common.NewError("traffic multiplier must be between 0.1 and 10")
+			}
+			if client.MaxIPs < 0 || client.MaxIPs > 10000 {
+				return nil, common.NewError("maximum IPs must be between 0 and 10000")
+			}
 			if err = s.validateClientName(tx, client); err != nil {
 				return nil, err
 			}
@@ -151,8 +188,33 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, err
 		}
+		var clientFields []map[string]json.RawMessage
+		if err = json.Unmarshal(data, &clientFields); err != nil {
+			return nil, err
+		}
 		seen := make(map[string]bool, len(clients))
-		for _, client := range clients {
+		for i, client := range clients {
+			if i < len(clientFields) {
+				var existing model.Client
+				if err = tx.Select("traffic_multiplier", "max_ips").Where("id = ?", client.Id).First(&existing).Error; err != nil {
+					return nil, err
+				}
+				if _, ok := clientFields[i]["trafficMultiplier"]; !ok {
+					client.TrafficMultiplier = existing.TrafficMultiplier
+				}
+				if _, ok := clientFields[i]["maxIPs"]; !ok {
+					client.MaxIPs = existing.MaxIPs
+				}
+			}
+			if client.TrafficMultiplier == 0 {
+				client.TrafficMultiplier = 1
+			}
+			if math.IsNaN(client.TrafficMultiplier) || math.IsInf(client.TrafficMultiplier, 0) || client.TrafficMultiplier < 0.1 || client.TrafficMultiplier > 10 {
+				return nil, common.NewError("traffic multiplier must be between 0.1 and 10")
+			}
+			if client.MaxIPs < 0 || client.MaxIPs > 10000 {
+				return nil, common.NewError("maximum IPs must be between 0 and 10000")
+			}
 			if err = s.validateClientName(tx, client); err != nil {
 				return nil, err
 			}
@@ -237,16 +299,22 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 func (s *ClientService) preserveServerOwnedFields(tx *gorm.DB, client *model.Client) {
 	var existing model.Client
 	if err := tx.Model(model.Client{}).
-		Select("created_at", "online_at", "up", "down", "total_up", "total_down").
+		Select("created_at", "online_at", "up", "down", "total_up", "total_down", "actual_up", "actual_down", "total_actual_up", "total_actual_down", "quota_up_remainder", "quota_down_remainder").
 		Where("id = ?", client.Id).First(&existing).Error; err != nil {
 		return
 	}
 	client.CreatedAt = existing.CreatedAt
 	client.OnlineAt = existing.OnlineAt
 
-	if client.Up == 0 && client.Down == 0 {
+	if client.Up == 0 && client.Down == 0 && client.ActualUp == 0 && client.ActualDown == 0 {
 		client.TotalUp = existing.TotalUp + existing.Up
 		client.TotalDown = existing.TotalDown + existing.Down
+		client.TotalActualUp = existing.TotalActualUp + existing.ActualUp
+		client.TotalActualDown = existing.TotalActualDown + existing.ActualDown
+		client.ActualUp = 0
+		client.ActualDown = 0
+		client.QuotaUpRemainder = 0
+		client.QuotaDownRemainder = 0
 		return
 	}
 
@@ -254,6 +322,12 @@ func (s *ClientService) preserveServerOwnedFields(tx *gorm.DB, client *model.Cli
 	client.Down = existing.Down
 	client.TotalUp = existing.TotalUp
 	client.TotalDown = existing.TotalDown
+	client.ActualUp = existing.ActualUp
+	client.ActualDown = existing.ActualDown
+	client.TotalActualUp = existing.TotalActualUp
+	client.TotalActualDown = existing.TotalActualDown
+	client.QuotaUpRemainder = existing.QuotaUpRemainder
+	client.QuotaDownRemainder = existing.QuotaDownRemainder
 }
 
 // clientNameJSON encodes a client name for the changes log. Built by string
@@ -594,8 +668,14 @@ func (s *ClientService) ResetClients(tx *gorm.DB, dt int64) ([]uint, error) {
 		client.NextReset = dt + (int64(client.ResetDays) * 86400)
 		client.TotalUp += client.Up
 		client.TotalDown += client.Down
+		client.TotalActualUp += client.ActualUp
+		client.TotalActualDown += client.ActualDown
 		client.Up = 0
 		client.Down = 0
+		client.ActualUp = 0
+		client.ActualDown = 0
+		client.QuotaUpRemainder = 0
+		client.QuotaDownRemainder = 0
 		if !client.Enable {
 			client.Enable = true
 			var clientInboundIds []uint
@@ -635,11 +715,17 @@ func (s *ClientService) ResetAllClientsTraffic() error {
 	result := db.Model(model.Client{}).
 		Where("(up + down) > 0 OR enable = false").
 		UpdateColumns(map[string]interface{}{
-			"total_up":   gorm.Expr("total_up + up"),
-			"total_down": gorm.Expr("total_down + down"),
-			"up":         0,
-			"down":       0,
-			"enable":     true,
+			"total_up":             gorm.Expr("total_up + up"),
+			"total_down":           gorm.Expr("total_down + down"),
+			"total_actual_up":      gorm.Expr("total_actual_up + actual_up"),
+			"total_actual_down":    gorm.Expr("total_actual_down + actual_down"),
+			"up":                   0,
+			"down":                 0,
+			"actual_up":            0,
+			"actual_down":          0,
+			"quota_up_remainder":   0,
+			"quota_down_remainder": 0,
+			"enable":               true,
 		})
 	if result.Error != nil {
 		return result.Error

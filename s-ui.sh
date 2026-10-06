@@ -19,6 +19,13 @@ function LOGI() {
 
 [[ $EUID -ne 0 ]] && LOGE "ERROR: You must be root to run this script! \n" && exit 1
 
+SUI_GITHUB_REPO="${SUI_GITHUB_REPO:-$(cat /usr/local/s-ui/.github-repository 2>/dev/null)}"
+SUI_GITHUB_REPO="${SUI_GITHUB_REPO:-alireza0/s-ui}"
+if [[ ! "$SUI_GITHUB_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    LOGE "Invalid SUI_GITHUB_REPO. Expected owner/repository."
+    exit 1
+fi
+
 if [[ -f /etc/os-release ]]; then
     source /etc/os-release
     release=$ID
@@ -83,7 +90,7 @@ before_show_menu() {
 }
 
 install() {
-    bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/main/install.sh)
+    SUI_GITHUB_REPO="$SUI_GITHUB_REPO" bash <(curl -Ls "https://raw.githubusercontent.com/${SUI_GITHUB_REPO}/main/install.sh")
     if [[ $? == 0 ]]; then
         if [[ $# == 0 ]]; then
             start
@@ -102,7 +109,7 @@ update() {
         fi
         return 0
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/main/install.sh)
+    SUI_GITHUB_REPO="$SUI_GITHUB_REPO" bash <(curl -Ls "https://raw.githubusercontent.com/${SUI_GITHUB_REPO}/main/install.sh")
     if [[ $? == 0 ]]; then
         LOGI "Update is complete, Panel has automatically restarted "
         exit 0
@@ -118,12 +125,10 @@ custom_version() {
     exit 1
     fi
 
-    download_link="https://raw.githubusercontent.com/alireza0/s-ui/main/install.sh"
-
-    install_command="bash <(curl -Ls $download_link) $panel_version"
+    download_link="https://raw.githubusercontent.com/${SUI_GITHUB_REPO}/main/install.sh"
 
     echo "Downloading and installing panel version $panel_version..."
-    eval $install_command
+    SUI_GITHUB_REPO="$SUI_GITHUB_REPO" bash <(curl -fsSL "$download_link") "$panel_version"
 }
 
 uninstall() {
@@ -323,7 +328,7 @@ show_log() {
 update_shell() {
     # Certificate verification stays on: this file is about to be installed as
     # /usr/bin/s-ui and run as root.
-    wget -O /usr/bin/s-ui -N https://github.com/alireza0/s-ui/raw/main/s-ui.sh
+    wget -O /usr/bin/s-ui -N "https://github.com/${SUI_GITHUB_REPO}/raw/main/s-ui.sh"
     if [[ $? != 0 ]]; then
         echo ""
         LOGE "Failed to download script, Please check whether the machine can connect Github"

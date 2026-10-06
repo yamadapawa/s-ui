@@ -117,10 +117,19 @@ func InitDB(dbPath string) error {
 	if err = dedupStats(); err != nil {
 		return err
 	}
+	// The new actual-traffic counters start as a copy of the old counters for
+	// existing installations. This runs only once, before AutoMigrate creates
+	// the actual_up column; future starts must not overwrite measured traffic.
+	hadActualTraffic := db.Migrator().HasColumn(&model.Client{}, "actual_up")
 
 	err = db.AutoMigrate(schemaModels()...)
 	if err != nil {
 		return err
+	}
+	if !hadActualTraffic {
+		if err = db.Exec(`UPDATE clients SET actual_up = up, actual_down = down, total_actual_up = total_up, total_actual_down = total_down`).Error; err != nil {
+			return err
+		}
 	}
 	err = initUser()
 	if err != nil {
